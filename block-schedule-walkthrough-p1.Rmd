@@ -1,0 +1,427 @@
+---
+output: 
+  html_document:
+    theme: default
+    highlight: haddock
+    df_print: tibble
+---
+
+<style>
+h1 {
+  padding-bottom: 20px;
+}
+.main-container {
+  max-width: 70%;
+  margin-left: 15%;
+  margin-right: 15%;
+  text-align: justify;
+}
+.container{
+  max-width: 100%;
+  margin-left: 0;
+  margin-right: 0;
+  padding-right: 0;
+  padding-left: 0;
+}
+border {
+  padding: 10px;
+}
+</style>
+
+``` {r, eval = TRUE, echo = FALSE, message = FALSE}
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(stringr)
+library(kableExtra)
+library(knitr)
+
+## Loading data
+
+courses      <- read.csv("sample data\\courses.csv", stringsAsFactors = FALSE)
+course_regs  <- read.csv("sample data\\course_regs.csv", stringsAsFactors = FALSE)
+
+
+## Tidying course data
+
+courses %>%
+  gather("BLOCK", "BLOCK_IND", 4:7) %>%
+  arrange(CRSE_ID,
+          BLOCK) %>%
+  mutate(row_name =  paste0(CRSE_ID, "_", BLOCK)) %>%
+  column_to_rownames(var = "row_name") -> courses 
+
+```
+
+# Block Schedule Walkthrough, Part 1
+
+### Introduction
+
+As the COVID-19 pandemic began to unfold, Eckerd College - like most colleges and universities - cancelled all in-person classes in March of 2020. Students were given a week to move out of the dorms, while faculty scrambled to redesign their courses to be delivered remotely. Using a mixture of technologies and formats, students completed the remainder of the Spring 2020 semester online.
+
+Not surprisingly, however, feedback from students indicated that they were dissatisfied with online learning. The shift to online classes was abrupt and there was an enormous amount of variation in the way each faculty approached online learning. Many students felt overwhelmed as they struggled to keep up with their required coursework.
+
+As a result, the college decided to implement a block schedule for the Fall 2020 semester. Instead of taking four courses simultaneously, students would take one course per block with each block lasting three and a half weeks. Similarly, faculty would only teach one course per block. The idea being that students - and faculty - would be better able to manage their time if they weren’t juggling multiple courses. Additionally, the block format would allow the college to resume or suspend in-person classes in between blocks depending on the state of the pandemic, minimizing the disruptions to the academic program.
+
+Unfortunately, current students had already registered for fall courses and the administration didn't want to upset students by forcing them to re-register for classes. Instead, the college wanted to use the current course registration data to create a block schedule.
+
+### Project Overview
+
+The goal is to produce a schedule that minimizes the number of course registration conflicts for current and incoming students. And, when conflicts do occur, the college would prefer that they affect freshmen and sophomores, since upperclassmen have less time before graduating to correct for any resulting conflicts. The college would also prefer that students get to take their courses with their intended professors, instead of being placed into another section with a different instructor.
+
+The scheduling project also has a few constraints. Students are only allowed to take one course per block. Faculty are only allowed to teach one course per block. And, for a variety of reasons, some courses can only be offered during certain blocks. 
+
+After a bit of research, I decided to use a [genetic algorithm](https://en.wikipedia.org/wiki/Genetic_algorithm) for this project. However, while I had a conceptual understanding of how they worked, I had never used - much less built - a genetic algorithm. This document - along with part two - was written to document and walk through my code for this project.
+
+### The Data
+
+The scheduling program takes two data frames as input. Both data files - as well as the complete R code for this project - are available on my github page. I removed all identifying information (e.g. student names, ID numbers, etc.) in order to make the full data available.
+
+The first data frame (`courses`) contains a list of courses for the fall semester and their scheduling constraints. `CRSE_ID` is a unique identifier for each section (some courses have multiple sections). And, `PROF_ID` is a unique identifier for each instructor, while `BLOCK_IND` indicates whether the course can be offed in a given block (i.e. FALL_1, FALL_2, etc.).
+
+<br>
+``` {r, echo = FALSE}
+
+kable(x = courses,
+      row.names = FALSE,
+      format = "html") %>%
+  kable_styling() %>%
+  scroll_box(height  = "200px")
+
+```
+<br>
+
+The second data frame (`course_regs`) contains course registration data for current and incoming students. In additional to `STUDENT_ID` and course registration details, it contains their class standing (e.g. SR = seniors), which will be used to weight course registration conflicts. Since incoming students have not registered for courses, we simulated course registration data for these students based on historical data. 
+
+<br>
+``` {r, echo = FALSE}
+
+kable(x = head(course_regs),
+      row.names = FALSE,
+      format = "html") %>%
+  kable_styling() %>%
+  scroll_box(height  = "200px")
+
+```
+<br>
+
+### Step 1: Initial Schedule Creation
+
+Since some courses can only be taught in certain blocks and professors can only teach one course per block, schedule creation is an iterative process. Courses that can only be taught in one block need to be scheduled before we schedule courses that can be taught in two blocks and so on. Moreover, after we schedule course section in a particular block, that block is no longer available for other course sections taught by the same professor.
+
+To do this, we can use a loop, but first we need create a few matrices:
+
+* `matrix_random_numbers` - A matrix containing random numbers, which will be used to generate unique schedules. The number of columns (i.e. schedules) in this matrix, as well as the other matricies, is controlled by the `temp_progeny` variable.
+* `matrix_block_contraints` - A matrix containing 0's and 1's to indicate whether a particular course section can be offered in a particular block (1 = yes, 0 = no). This matrix will be used to prevent course sections from being scheduled in inappropriate blocks.
+* `matrix_unscheduled_courses` - A matrix containing 0's and 1's to indicate whether a particular course section has been scheduled (1 = no, 0 = yes).
+* `matrix_final_schedule` - A matrix containing 0's and 1's indicating which block each course section is to be offered. 
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+matrix_random_numbers   <- matrix(data     = runif(n = temp_progeny*nrow(courses)),
+                                  ncol     = temp_progeny,
+                                  nrow     = nrow(courses),
+                                  dimnames = list(row.names(courses),
+                                                  paste0("SCHD_", 1:temp_progeny)))
+
+matrix_block_contraints <- matrix(data     = courses$BLOCK_IND,
+                                  ncol     = temp_progeny,
+                                  nrow     = nrow(courses),
+                                  dimnames = list(row.names(courses),
+                                                  paste0("SCHD_", 1:temp_progeny)))
+
+matrix_unscheduled_courses <- matrix(data     = 1,
+                                     ncol     = temp_progeny,
+                                     nrow     = nrow(courses),
+                                     dimnames = list(row.names(courses),
+                                                       paste0("SCHD_", 1:temp_progeny)))
+
+matrix_final_schedule   <- matrix(data     = NA,
+                                  ncol     = temp_progeny,
+                                  nrow     = nrow(courses),
+                                  dimnames = list(paste0(row.names(courses)),
+                                                  paste0("SCHD_", 1:temp_progeny)))
+
+
+```
+
+Then, we run the loop to schedule course sections into blocks. The comments in the code chunk below describe each step of the process. 
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+for (i in 1:4) {
+  
+  ## Since some course sections have fewer scheduling options, we need to schedule those sections first. To
+  ## do this we create a matrix to priotize the section for each professor that has the fewest scheduling
+  ## options. 
+  
+  courses %>%
+    cbind(matrix_random_numbers*matrix_block_contraints*matrix_unscheduled_courses) %>%
+    group_by(PROF_ID, 
+             CRSE_ID) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(sum(. > 0))) %>%
+    group_by(PROF_ID) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(ifelse(suppressWarnings(min(.[.>0])) == ., 1, 0))) %>%
+    ungroup() %>%
+    select_at(.vars = vars(matches("^SCHD_"))) %>%
+    as.matrix() -> matrix_course_scheduling_priority
+  
+                
+  ## Scheduling priority course sections, by selecting the block for each section the with the max value -
+  ## based - in part - on matrix of random numbers
+    
+  courses %>% 
+    cbind(matrix_random_numbers*matrix_block_contraints*matrix_unscheduled_courses*matrix_course_scheduling_priority) %>%
+    group_by(PROF_ID) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(case_when(. == suppressWarnings(max(.[.>0])) ~ 1))) -> temp_schedule      
+
+  
+  ## Once a course section is scheduled in a particular block, we need to prevent additional courses taught
+  ## by the same professor from being scheduled in that same block. 
+  
+  temp_schedule %>%
+    group_by(PROF_ID,
+             BLOCK) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(case_when(is.na(.) == TRUE & sum(., na.rm = TRUE) == 1 ~ 0,
+                                     TRUE ~ .))) %>%
+    ungroup() -> temp_schedule
+  
+  
+  ## Similairly, once a course section has been scheduled, we need to prevent that section from being 
+  ## scheduled in another block
+  
+  temp_schedule %>%
+    group_by(PROF_ID,
+             CRSE_ID) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(case_when(is.na(.) == TRUE & sum(., na.rm = TRUE) == 1 ~ 0,
+                                     TRUE ~ .))) %>%
+    ungroup() %>%
+    select_at(.vars = vars(matches("^SCHD_"))) %>%
+    as.matrix() -> temp_schedule
+  
+  
+  ## Filling in the final schedule matrix with the newly scheduled courses (i.e. temp schedule)
+  
+  matrix_final_schedule[is.na(matrix_final_schedule)] <- temp_schedule[which(is.na(matrix_final_schedule))]
+  
+  
+  ## Filling in unscheduled course matrix
+  
+  matrix_unscheduled_courses <- matrix_final_schedule
+  matrix_unscheduled_courses[is.na(matrix_unscheduled_courses) == FALSE] <- 0
+  matrix_unscheduled_courses[is.na(matrix_unscheduled_courses) == TRUE]  <- 1
+  
+  
+  ## cleaning up the loop environment
+  
+  rm(temp_schedule, matrix_course_scheduling_priority)
+  print(i)
+
+  
+  ## Breaking the loops once the schedule is done
+  
+  if (sum(matrix_unscheduled_courses) == 0) {
+    
+    print("The schedules are finished and a solution was found.")
+    break
+    
+  }
+  
+}
+
+```
+
+Next, we remove any duplicate schedules, which can arise by chance. Duplicate schedules slow down the scoring process and can cause some additional issues later on. We also remove any schedules that have a section scheduled in multiple blocks. While rare, these cases are caused by ties in the random number matrix during the scheduling loop process and can lead to error later on.
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+## De-dpulicating schedules
+
+matrix_final_schedule <- t(unique(t(matrix_final_schedule)))
+
+
+## Removing any schedules where a section was scheduled more multiple blocks
+
+schedules <- schedules[, which(colSums(schedules) == length(unique((courses$CRN))))]
+
+```
+<br>
+
+### Step 3: Calculating Fitness
+
+While our goal is minimize the number of course registration conflicts, using the number of conflicts produced by each schedule as a fitness score is not practical. Since course sections have enrollment caps and some courses are offered in multiple block, scheduling students into sections is an iterative process. Scheduling students into sections for multiple schedules simultaneously would be memory intensive and extremely time consuming.
+
+Instead, we estimate the number of course registration conflicts for each schedule to use as a fitness score. This is significantly faster and a cursory analysis suggests that it is a decent proxy measure.
+
+To do this, we create a matrix to store the fitness scores. Since we are estimating the number of conflicts per student, the dimensions of this matrix as based on the number of students in our population and the number of schedules being scored.
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+## Creating a matrix to store cost
+
+matrix_cost <- matrix(data = 0,
+                      ncol = ncol(matrix_final_schedule),
+                      nrow = length(unique(course_regs$STUDENT_ID)),
+                      dimnames = list(1:length(unique(course_regs$STUDENT_ID)),
+                                      colnames(matrix_final_schedule)))
+
+
+```
+
+Then, we run a loop over each of the blocks to the calculate fitness scores for each schedule. For each student, we determine whether one of their intended sections is being offered in that block. And, if not, whether any intended courses - but different sections - are being offered in that block. If a student could register for an intended section, they receive a score of 0. If the student could not, their score is based on the number of intended courses - but different sections - for which they could register. For example, if a student couldn't register for any of their intended sections but there is another section of intended course being offered, they would receive a score of 0.5. And, if a student couldn't register for any of their intended sections but there are other sections for two other intended courses being offered, they would receive a score 0.33. 
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+for (i in unique(courses$BLOCK)) {
+  
+  ## Getting a list of course sections (i.e. CRSE_ID's) within block i for each schedule
+  
+  courses %>%
+    cbind(matrix_final_schedule) %>%
+    filter(BLOCK == i) %>%
+    summarise_at(.vars = vars(matches("^SCHD_")),
+                 .funs = funs(list(CRSE_ID[.==1]))
+                 ) -> temp_block_crse_id
+  
+  ## Getting a list of unique courses within block i for each schedule
+  
+  courses %>%
+    cbind(matrix_final_schedule) %>%
+    filter(BLOCK == i) %>%
+    summarise_at(.vars = vars(matches("^SCHD_")),
+                 .funs = funs(list(unique(CRSE[.==1])))
+                 ) -> temp_block_crse
+  
+  ## Checking if each students has a course section in block i for each schedule
+  
+  course_regs %>%
+    select(STUDENT_ID,
+           CLASS,
+           CRSE_ID) %>%
+    cbind(matrix(data = NA,
+                 ncol = ncol(matrix_final_schedule),
+                 nrow = nrow(.),
+                 dimnames = list(paste0(.$STUDENT_ID, "_", .$CRSE_ID), 
+                                 colnames(matrix_final_schedule)))) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(!as.numeric(CRSE_ID %in% unlist(temp_block_crse_id$.)))) %>%
+    group_by(STUDENT_ID,
+             CLASS) %>%
+    summarise_at(.vars = vars(matches("^SCHD_")),
+                 .funs = funs(as.numeric(min(.)))) %>%
+    ungroup() -> matrix_regs_block_crse_id
+  
+  ## Since we want to minimize course resistration conflicts for upperclassmen, we weight
+  ## those conflicts more heavily
+  
+  matrix_regs_block_crse_id %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(case_when(CLASS == "SR" ~ .*3,
+                                     CLASS == "JR" ~ .*1.5,
+                                     TRUE ~ .))) %>%
+    select(-STUDENT_ID,
+           -CLASS) %>%
+    as.matrix() -> matrix_regs_block_crse_id
+  
+  ## Counting the number of courses for each student in block i for each schedule and then transforming 
+  ## that number into a score
+  
+  course_regs %>%
+    select(STUDENT_ID,
+           CRSE) %>%
+    cbind(matrix(data = NA,
+                 ncol = ncol(matrix_final_schedule),
+                 nrow = nrow(.),
+                 dimnames = list(paste0(.$STUDENT_ID, "_", .$CRSE_ID), 
+                                 colnames(matrix_final_schedule)))) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(as.numeric(CRSE %in% unlist(temp_block_crse$.)))) %>%
+    group_by(STUDENT_ID) %>%
+    summarise_at(.vars = vars(matches("^SCHD_")),
+                 .funs = funs(1/(1+sum(.)))) %>%
+    ungroup() %>%
+    select(-STUDENT_ID) %>%
+      as.matrix() -> matrix_regs_block_crse
+  
+  ## Calculating the final score for each student for block i and adding it to the master cost matrix
+  
+  matrix_cost <- matrix_cost+(matrix_regs_block_crse_id*matrix_regs_block_crse)
+  
+  ## Cleaning up loop enviroment
+  
+  rm(temp_block_crse_id, temp_block_crse, 
+     matrix_regs_block_crse_id, matrix_regs_block_crse)
+  
+  print(i)
+  
+}
+
+
+```
+
+
+### Step 4: Selection Event
+
+For the selection event we select the top scoring schedules and discard the rest. Since a lower fitness score indicates fewer conflicts, we select the one hundred schedules - controlled by the `temp_survivor` variable - with the lowest fitness scores.
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+## Ranking potential schedules by fitness function
+
+data.frame(SCHD          = colnames(matrix_cost),
+           FITNESS       = colSums(matrix_cost),
+           TOT_CRSE_REGS = nrow(course_regs),
+           MODELS_BULIT  = ncol(matrix_cost),
+           stringsAsFactors = FALSE) %>%
+  arrange(FITNESS) %>%
+  filter(row_number() <= temp_survivors) -> temp_best_schds
+
+## Selecting the schedules with the best performance
+
+matrix_final_schedule %>%
+  as.data.frame() %>%
+  select(temp_best_schds$SCHD) %>%
+  rename_all(.funs = funs(paste0("SCHD_", 1:temp_survivors))) %>%
+  merge(x  = courses,
+        by = 0) %>%
+  column_to_rownames("Row.names") -> final_schedules
+
+```
+
+Then, we write these schedules to file, so that they can serve as the input for part two of the program. We also save the fitness score of the best schedule - along with a few other data points - so that we will be able to visualize performance over time. 
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+## Writing selected schedules to file
+
+final_schedules %>%
+  write.csv(file = "output/best_schedules.csv")
+
+## Writing summary stats for the best schedule
+
+temp_best_schds %>%
+  filter(row_number() == 1) %>%
+  write.csv(file = "output/fitness_over_time.csv",
+            row.names = FALSE)
+
+```
+<br>
+
+### Conclusion
+
+This concludes the first portion of the scheduling program. In Part 2, we will walk through the second half of the scheduling program wherein we will introduce variation through crossover and mutation events as part of future generations. 
+
+
+
+
+
+
+
+
+
