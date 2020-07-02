@@ -1,0 +1,308 @@
+---
+output: 
+  html_document:
+    theme: default
+    highlight: haddock
+    df_print: tibble
+---
+
+<style>
+h1 {
+  padding-bottom: 20px;
+}
+.main-container {
+  max-width: 70%;
+  margin-left: 15%;
+  margin-right: 15%;
+  text-align: justify;
+}
+.container{
+  max-width: 100%;
+  margin-left: 0;
+  margin-right: 0;
+  padding-right: 0;
+  padding-left: 0;
+}
+border {
+  padding: 10px;
+}
+</style>
+
+``` {r, eval = TRUE, echo = FALSE, message = FALSE}
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+fitness_over_time <- read.csv("output/fitness_over_time.csv", stringsAsFactors = FALSE)
+
+fitness_over_time %>%
+  mutate(GENERATION = row_number()-1) %>%
+  ggplot() +
+    geom_line(aes(x = GENERATION,
+                  y = FITNESS),
+              lwd = 1) +
+  scale_x_continuous(name         = "Generation",
+                     minor_breaks = FALSE,
+                     limits       = c(0, 250)) +
+  scale_y_continuous(name = "Fitness",
+                     minor_breaks = FALSE,
+                     limits = c(1600, 2600),
+                     breaks = c(1600, 1800, 2000, 2200, 2400, 2600)) +
+  theme(axis.ticks   = element_blank(),
+        axis.text    = element_text(color = "black"),
+        axis.title.x = element_text(margin = unit(c(0.5, 0, 0, 0), "cm")),
+        axis.title.y = element_text(margin = unit(c(0, 0.5, 0, 0), "cm"))) -> plot_1
+
+```
+
+# Block Schedule Walkthrough, Part II
+
+### Introduction
+
+Genetic algorithms are an iterative process. First, you create an initial population of solutions and select the best solutions. Then, you take these solutions, make some change to create a new batch of solutions, and select the best solutions from the new batch. This process --- making changes and selecting the best resulting solutions --- is repeated over and over. After several generations, this process will produce a set of schedules better that the solutions from your initial population.
+
+In part I, we walked through the first half of the scheduling program. After creating and scoring our initial batch of schedules, we saved the hundred best schedules to file. These schedules will serve as the input for the second half of the scheduling programing.
+
+Here - In part II - we will walk through the second half the program wherein we will introduce variation by making changes the schedules from the prior generation. Since this portion of the program is comprised of a giant loop, we will break down each step within loop --- rather than posting the loop in its entirety.
+
+### Variables & Data
+
+First, we create some variables, which will be used at various steps in the loop. These variables control the number of schedules to select (i.e. `temp_survivors`) at the end of each generation as well as the how much variation to introduce when creating new schedules. 
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+  ## Setting up variables
+  
+  temp_survivors <- 100
+  
+  temp_crossover <- 70
+  temp_migration <- 100
+  temp_mutations <- 5
+  
+  temp_crossover_freq <- rpois(n = 100, lambda = 2)
+  temp_mutation_freq  <- rpois(n = 100, lambda = 4)
+  
+  
+```  
+  
+We also create a few small functions. These functions will be important when we introduce variation through mutation and crossover events. As will later see, these functions are used to identify courses that should be scheduled in a different block.
+  
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+## Function to sample profs to mutate
+
+  sample_subj <- function(temp_var) {sample(x     = unique(courses$SUBJ),
+                                             size = sample(x    = temp_var,
+                                                           size = 1)+1,
+                                             replace = FALSE)
+  }
+  
+    
+  sample_profs <- function(temp_var) {sample(x    = unique(courses$PROF_ID),
+                                             size = sample(x    = temp_var,
+                                                           size = 1)+1,
+                                             replace = FALSE)
+  }
+  
+```
+
+Next, we load our data, which includes the best schedules from the prior generation, the course registration data for current and incoming students, and a file that contains some metrics about the schedules created in each generation. We also have to do a little bit of data cleaning before our next step.
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+  ## Loading the data
+  
+  read.csv("output/best_schedules.csv", stringsAsFactors = FALSE) %>%
+    column_to_rownames("X") -> initial_schedules
+  
+  read.csv("sample data/course_regs.csv", 
+           stringsAsFactors = FALSE) -> course_regs
+  
+  read.csv("output/fitness_over_time.csv", 
+           stringsAsFactors = FALSE) -> best_schd_summary_stats
+  
+  ## Getting a list of courses
+  
+  initial_schedules %>%
+    select_at(.vars = vars(-matches("^SCHD_"))) -> courses
+  
+  ## creating the initial schedule matrix
+  
+  initial_schedules %>%
+    select_at(.vars = vars(matches("^SCHD_"))) %>%
+    as.matrix() -> initial_schedules
+  
+```
+
+### Introducing Variation
+
+In order to improve upon the performance of the best schedules from the past generation, we need to introduce variation. To do this, we introduce variation in three ways:
+
+* Crossover - Similar to crossover in meiosis, crossing over involves switching out large sections of one schedule for a corresponding section in another schedule.
+* Point Mutations - Point mutations involve selecting and re-scheduling individual courses. 
+* Migration - Migration is done by generating completely new schedules and adding them to our population.
+
+
+#### Crossover
+
+To perform crossover, we first duplicate the initial schedules to produce a large matrix with several identical copies of each schedule. The exact number of duplication is controlled by the `temp_crossover` variable, so that it can easily be modified. We also rename the schedules, which will make things a little easier later on. 
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+  ## Duplicating the schedules & renaming columns
+  
+  crossover_schedules <- do.call(cbind, replicate(temp_crossover, initial_schedules, simplify=FALSE))
+  
+  colnames(crossover_schedules) <- paste0("SCHD_C_", 1:ncol(crossover_schedules))
+
+```
+
+Then, we need to select the potions of each schedule that we want to swap out for a portion of another schedule. And, because professors can't teach more than one course per block, we have to keep the schedule for each professor intact. That prevents professors from being double booked during any given block. 
+
+To do this, we select disciplines using the `temp_crossover_freq` function. The function selects a variable number of disciplines from a poison distribution, such that only a couple of disciplines will be selected for most schedules. Then, we delete of the schedules of any professor teaching within that disciple. 
+
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+  
+  ## Selecting disciplines for cross over events
+
+  courses %>%
+    cbind(crossover_schedules) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(ifelse(SUBJ %in% sample_subj(temp_crossover_freq), 1, 0))) %>%
+    group_by(PROF_ID) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(max(.))) %>%
+    ungroup() %>%
+    select_at(.vars = vars(matches("^SCHD_"))) %>%
+    as.matrix() -> matrix_crossover
+  
+  
+  ## Deleting prof schedules where crossover events are to occur
+  
+  crossover_schedules[matrix_crossover == 1] <- NA
+```
+  
+Next, we create a matrix with the same dimensions as our `crossover_schedules` and populate it using schedule from our initial population. However, by using the `sample` funcion we randomize the order of the columns. Then, we complete crossover, by replacing the missing values in the `crossover_schedules` matrix with the corresponding values from our new matrix (i.e. `matrix_crossover`).
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+  ## Preforming crossover
+
+  matrix_crossover <- initial_schedules[, sample(x       = ncol(initial_schedules), 
+                                                 size    = ncol(crossover_schedules),
+                                                 replace = TRUE)]
+  
+  crossover_schedules[is.na(crossover_schedules)] <- matrix_crossover[which(is.na(crossover_schedules))]
+
+  
+```
+
+
+#### Point Mutations
+
+For point mutations, similar to crossover, we begin by duplicating our initial schedules using the `temp_mutations` variable. And, just as in crossover, we rename these schedules. 
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+  ## Duplicating the schedules & renaming columns
+  
+  mutation_schedules <- do.call(cbind, replicate(floor(temp_mutations), 
+                                                 initial_schedules, simplify=FALSE))
+  
+  colnames(mutation_schedules) <- paste0("SCHD_M_", 1:ncol(mutation_schedules))
+
+```  
+
+Then, we select professors at random using the `sample_prof` function. This function samples a variable number of professors from a Poisson distribution for each schedule. Again, for most schedules, only a small handful of professor will be selected. But, several professors will be selected for a few schedules. The schedules of the selected professors are then deleted. 
+  
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+  ## Selecting profs for point mutations
+  
+  courses %>%
+    cbind(mutation_schedules) %>%
+    mutate_at(.vars = vars(matches("^SCHD_")),
+              .funs = funs(ifelse(PROF_ID %in% sample_profs(temp_mutation_freq), 1, 0))) %>%
+    select_at(.vars = vars(matches("^SCHD_"))) %>%
+    as.matrix() -> matrix_mutations
+  
+  
+  ## Deleting prof schedules where mutations occur
+  
+  mutation_schedules[matrix_mutations == 1] <- NA
+  
+```
+
+#### Migration
+
+For migration, we simply create an empty matrix. The names and numbers of columns is controlled the `temp_migration` variable, while the number of row is equal to the number of rows in our `initial_population` matrix.
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+  ## Creating new schedules for migration event
+  
+  migration_schedules <- matrix(data = NA,
+                                ncol = temp_migration,
+                                nrow = nrow(initial_schedules),
+                                dimnames = list(row.names(initial_schedules),
+                                                paste0("SCHD_N_", 1:temp_migration)))
+  
+  rm(temp_migration)
+  
+```
+
+
+### Scheduling Classes
+
+Since our schedules from the point mutation and migration steps contain missing values, we need to fill those cells and reschedule the corresponding courses. To do this, we combine the `mutation_schedules` and `migration_schedules` matrices and then run them through the same scheduling loop from Part I. We won't walk through that code, since it is the same code. 
+
+After scheduling is finished, we recombine all of the schedules, including out including our initial schedules. And, just as in Part I, we remove any duplicate schedules and any schedules where a section was scheduled in multiple blocks. 
+
+``` {r, attr.source = ".numberLines", eval = FALSE}
+
+  ## Recombining the schedules
+  
+  schedules <- cbind(initial_schedules,
+                     crossover_schedules,
+                     matrix_solve)
+  
+  rm(initial_schedules,
+     crossover_schedules,
+     matrix_solve)
+  
+  
+  ## Depulicating schedules
+  
+  schedules <- t(unique(t(schedules)))
+  
+  ## Removing any schedules where a section was scheduled more multiple blocks
+  
+  schedules <- schedules[, which(colSums(schedules) == length(unique((courses$CRN))))]
+  
+  
+```
+
+By including our initial schedules, we ensure that the best schedules from this generation cannot be worse that the best schedule from the prior generation. 
+
+
+### Calculating Fitness & Selection Events
+
+Calculating fitness and selectiing the best schedules is no different than what we did in Part I. As a result, we aren't going to walk through this section of code. If you want to review those steps, see Part I.
+
+After selection, the remaining schedules are written to file and will serve as the input for the next generation. Similarly, the file containing metrics for each generation is updated and saved to fie. 
+
+### Results
+
+After testing and re-retesting the code, we ran this program over a long weekend to generate a final schedule. After three days and 250 generations, we created and evaluated over 325K schedules. The graph below shows the improvement in fitness of the best schedule from each geneation over time. As you can see, schedule perfomance improved rapidly at first before evently leveling off. 
+
+
+``` {r echo = FALSE, fig.height = 3, out.width = "100%"}
+
+plot_1
+
+```
+
+By the end, we were able to preserve just over 87% of all course registrations and 89% of course registrations for seniors. The majority of current students had no course registration conflicts and only 5% of students had two or more conflicts. Moreover, for course registrations that we were able to honor, students were placed into sections taught by their desired instructor just over 90% of the time. 
+

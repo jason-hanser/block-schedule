@@ -46,7 +46,7 @@ course_regs  <- read.csv("sample data\\course_regs.csv", stringsAsFactors = FALS
 ## Tidying course data
 
 courses %>%
-  gather("BLOCK", "BLOCK_IND", 4:7) %>%
+  gather("BLOCK", "BLOCK_IND", 5:8) %>%
   arrange(CRSE_ID,
           BLOCK) %>%
   mutate(row_name =  paste0(CRSE_ID, "_", BLOCK)) %>%
@@ -54,15 +54,15 @@ courses %>%
 
 ```
 
-# Block Schedule Walkthrough, Part 1
+# Block Schedule Walkthrough, Part I
 
 ### Introduction
 
-As the COVID-19 pandemic began to unfold, Eckerd College - like most colleges and universities - cancelled all in-person classes in March of 2020. Students were given a week to move out of the dorms, while faculty scrambled to redesign their courses to be delivered remotely. Using a mixture of technologies and formats, students completed the remainder of the Spring 2020 semester online.
+As the COVID-19 pandemic began to unfold, Eckerd College --- like most colleges and universities --- cancelled all in-person classes in March of 2020. Students were given a week to move out of the dorms, while faculty scrambled to redesign their courses to be delivered remotely. Using a mixture of technologies and formats, students completed the remainder of the Spring 2020 semester online.
 
 Not surprisingly, however, feedback from students indicated that they were dissatisfied with online learning. The shift to online classes was abrupt and there was an enormous amount of variation in the way each faculty approached online learning. Many students felt overwhelmed as they struggled to keep up with their required coursework.
 
-Consequently, the college decided to implement a block schedule for the Fall 2020 semester. Instead of taking four courses simultaneously, students would take one course per block with each block lasting three and a half weeks. Similarly, faculty would only teach one course per block. The idea being that students - and faculty - would be better able to manage their time if they weren’t juggling multiple courses. Additionally, the block format would allow the college to resume or suspend in-person classes in between blocks depending on the state of the pandemic, minimizing the disruptions to the academic program.
+Consequently, the college decided to implement a block schedule for the Fall 2020 semester. Instead of taking four courses simultaneously, students would take one course per block with each block lasting three and a half weeks. Similarly, faculty would only teach one course per block. The idea being that students and faculty would be better able to manage their time if they weren’t juggling multiple courses. Additionally, the block format would allow the college to resume or suspend in-person classes in between blocks depending on the state of the pandemic, minimizing the disruptions to the academic program.
 
 Unfortunately, current students had already registered for fall courses and the administration didn't want to upset students by forcing them to re-register for classes. Instead, the college wanted to use the current course registration data to create a block schedule.
 
@@ -72,11 +72,11 @@ The goal is to produce a schedule that minimizes the number of course registrati
 
 The scheduling project also has a few constraints. Students are only allowed to take one course per block. Faculty are only allowed to teach one course per block. And, for a variety of reasons, some courses can only be offered during certain blocks. 
 
-After a bit of research, I decided to use a [genetic algorithm](https://en.wikipedia.org/wiki/Genetic_algorithm) for this project. However, while I had a conceptual understanding of how they worked, I had never used - much less built - a genetic algorithm. This document - along with part two - was written to document and walk through my code for this project.
+After a bit of research, I decided to use a [genetic algorithm](https://en.wikipedia.org/wiki/Genetic_algorithm) for this project. While I had never used --- much less built --- a genetic algorithm, I was familiar with the general concepts and felt it was workable solution given the problem and time constraints. This document - along with part two - was written to document and walk through my code for this project.
 
 ### The Data
 
-The scheduling program takes two data frames as input. Both data files - as well as the complete R code for this project - are available on my github page. I removed all identifying information (e.g. student names, ID numbers, etc.) in order to make the full data available.
+The scheduling program takes two data frames as input. Both data files --- as well as the complete R code for this project --- are available on my github page. I removed all identifying information (e.g. student names, ID numbers, etc.) in order to make the full data available.
 
 The first data frame (`courses`) contains a list of courses for the fall semester and their scheduling constraints. `CRSE_ID` is a unique identifier for each section (some courses have multiple sections). And, `PROF_ID` is a unique identifier for each instructor, while `BLOCK_IND` indicates whether the course can be offed in a given block (i.e. FALL_1, FALL_2, etc.).
 
@@ -106,7 +106,7 @@ kable(x = head(course_regs),
 ```
 <br>
 
-### Step 1: Initial Schedule Creation
+### Initial Schedule Creation
 
 Since some courses can only be taught in certain blocks and professors can only teach one course per block, schedule creation is an iterative process. Courses that can only be taught in one block need to be scheduled before we schedule courses that can be taught in two blocks and so on. Moreover, after we schedule course section in a particular block, that block is no longer available for other course sections taught by the same professor.
 
@@ -253,7 +253,7 @@ schedules <- schedules[, which(colSums(schedules) == length(unique((courses$CRN)
 ```
 <br>
 
-### Step 3: Calculating Fitness
+### Calculating Fitness
 
 While our goal is minimize the number of course registration conflicts, using the number of conflicts produced by each schedule as a fitness score is not practical. Since course sections have enrollment caps and some courses are offered in multiple block, scheduling students into sections is an iterative process. Scheduling students into sections for multiple schedules simultaneously would be memory intensive and extremely time consuming.
 
@@ -274,7 +274,7 @@ matrix_cost <- matrix(data = 0,
 
 ```
 
-Then, we run a loop over each of the blocks to the calculate fitness scores for each schedule. For each student, we determine whether one of their intended sections is being offered in that block. And, if not, whether any intended courses - but different sections - are being offered in that block. If a student could register for an intended section, they receive a score of 0. If the student could not, their score is based on the number of intended courses - but different sections - for which they could register. For example, if a student couldn't register for any of their intended sections but there is another section of intended course being offered, they would receive a score of 0.5. And, if a student couldn't register for any of their intended sections but there are other sections for two other intended courses being offered, they would receive a score 0.33. 
+Then, we run a loop over each of the blocks to the calculate fitness scores for each schedule. For each student, we determine whether one of their intended sections is being offered in that block. And, if not, whether any different sections of intended courses are being offered in that block. If a student could register for an intended section, they receive a score of 0. If the student could not, their score is based on the number of different sections of intended courses for which they could register. For example, if a student couldn't register for any of their intended sections but there is another section of intended course being offered, they would receive a score of 0.5. And, if a student couldn't register for any of their intended sections but there are other sections for two other intended courses being offered, they would receive a score 0.33. 
 
 ``` {r, attr.source = ".numberLines", eval = FALSE}
 
@@ -366,9 +366,9 @@ for (i in unique(courses$BLOCK)) {
 ```
 
 
-### Step 4: Selection Event
+### Selection Event
 
-For the selection event we select the top scoring schedules and discard the rest. Since a lower fitness score indicates fewer conflicts, we select the one hundred schedules - controlled by the `temp_survivor` variable - with the lowest fitness scores.
+For the selection event we select the top scoring schedules and discard the rest. Since a lower fitness score indicates fewer conflicts, we select the one hundred schedules --- controlled by the `temp_survivor` variable --- with the lowest fitness scores.
 
 ``` {r, attr.source = ".numberLines", eval = FALSE}
 
@@ -394,7 +394,7 @@ matrix_final_schedule %>%
 
 ```
 
-Then, we write these schedules to file, so that they can serve as the input for part two of the program. We also save the fitness score of the best schedule - along with a few other data points - so that we will be able to visualize performance over time. 
+Then, we write these schedules to file, so that they can serve as the input for part two of the program. We also save the fitness score of the best schedule --- along with a few other data points --- so that we will be able to visualize performance over time. 
 
 ``` {r, attr.source = ".numberLines", eval = FALSE}
 
@@ -415,7 +415,7 @@ temp_best_schds %>%
 
 ### Conclusion
 
-This concludes the first portion of the scheduling program. In Part 2, we will walk through the second half of the scheduling program wherein we will introduce variation through crossover and mutation events as part of future generations. 
+This concludes the first portion of the scheduling program. In Part II, we will walk through the second half of the scheduling program wherein we will introduce variation through crossover and mutation events as part of future generations. 
 
 
 
