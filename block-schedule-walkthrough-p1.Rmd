@@ -97,7 +97,7 @@ The second data frame (`course_regs`) contains course registration data for curr
 <br>
 ``` {r, echo = FALSE}
 
-kable(x = head(course_regs),
+kable(x = course_regs,
       row.names = FALSE,
       format = "html") %>%
   kable_styling() %>%
